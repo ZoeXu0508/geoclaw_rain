@@ -50,6 +50,19 @@ module model_storm_module
         real(kind=8), allocatable :: central_pressure_change(:)
 
     end type model_storm_type
+        
+    
+    ! Model rain type definition
+    type model_rain_type       
+        ! Rain data parameters
+        
+        ! Time series and longitude and latitude of the rain data
+        real(kind=8), allocatable :: time(:), lon(:), lat(:)
+        
+        ! Rainfall intensity at each (time, latitude, longitude) point
+        real(kind=8), allocatable :: rain_rate(:,:,:)
+        
+    end type model_rain_type
 
     ! Interal tracking variables for storm
     integer, private :: last_storm_index
@@ -78,7 +91,7 @@ contains
 
 
     ! Setup routine for model storms
-    subroutine set_storm(storm_data_path, storm, storm_spec_type, log_unit)
+    subroutine set_storm(storm_data_path, rain_data_path, storm, storm_spec_type, rain, log_unit)
 
         use geoclaw_module, only: deg2rad, spherical_distance, coordinate_system
         use amr_module, only: t0, rinfinity
@@ -86,18 +99,19 @@ contains
         implicit none
 
         ! Subroutine I/O
-        character(len=*), optional :: storm_data_path
+        character(len=*), optional :: storm_data_path, rain_data_path
         type(model_storm_type), intent(inout) :: storm
+        type(model_rain_type), intent(inout) :: rain
         integer, intent(in) :: storm_spec_type, log_unit
 
         ! Local storage
-        integer, parameter :: data_file = 701
+        integer, parameter :: data_file = 701, rain_data_file = 702
         integer :: i, k, io_status
         real(kind=8) :: x(2), y(2), ds, dt
 
         if (.not. module_setup) then
 
-            ! Open data file
+            ! Open storm data file
             print *,'Reading storm date file ', storm_data_path
             open(unit=data_file, file=storm_data_path, status='old',        &
                  action='read', iostat=io_status)
@@ -199,11 +213,104 @@ contains
                                              storm%central_pressure(i)
             enddo
 
-            module_setup = .true.
+            ! Open rain data file
+            
+            use netcdf
+            ! Declare variables for NetCDF
+            integer :: ncid, varid, retval
+            integer :: time_dim, lat_dim, lon_dim, time_len, lat_len, lon_len
+            ! integer :: time_index, lat_index, lon_index
+
+            ! Open the NetCDF file
+            retval = nf90_open(rain_data_path, NF90_NOWRITE, ncid)
+            if (retval /= NF90_NOERR) call handle_error(retval)
+
+            ! Get dimensions
+            retval = nf90_inq_dimid(ncid, 'time', time_dim)
+            retval = nf90_inq_dimlen(ncid, time_dim, time_len)
+            retval = nf90_inq_dimid(ncid, 'lat', lat_dim)
+            retval = nf90_inq_dimlen(ncid, lat_dim, lat_len)
+            retval = nf90_inq_dimid(ncid, 'lon', lon_dim)
+            retval = nf90_inq_dimlen(ncid, lon_dim, lon_len)
+            
+            ! Allocate arrays
+            allocate(rain%rain_rate(time_len, lat_len, lon_len))
+            allocate(rain%lat(lat_len))
+            allocate(rain%lon(lon_len))
+            allocate(rain%time(time_len))
+            
+            ! Read variables
+            retval = nf90_inq_varid(ncid, 'cmorph', varid)
+            retval = nf90_get_var(ncid, varid, rain%rain_rate)
+            retval = nf90_inq_varid(ncid, 'lat', varid)
+            retval = nf90_get_var(ncid, varid, rain%lat)
+            retval = nf90_inq_varid(ncid, 'lon', varid)
+            retval = nf90_get_var(ncid, varid, rain%lon)
+            retval = nf90_inq_varid(ncid, 'time', varid)
+            retval = nf90_get_var(ncid, varid, rain%time)
+                    
+            ! Close the NetCDF file
+            retval = nf90_close(ncid)
+
+            module_setup = .true.            
         end if
 
     end subroutine set_storm
 
+    ! ==========================================================================
+    !  get_rain_interp(t, x, y, rain)
+    !    Interpolate rain in the current time interval
+    ! ==========================================================================
+    pure real(kind=8) function get_rain_interp(t, x, y, rain) result(rain_interp)
+        implicit none
+    
+        ! 输入参数
+        real(kind=8), intent(in) :: t, x, y
+        type(rain_data_type), intent(in) :: rain
+    
+        ! 局部变量
+        integer :: time_index, lat_index_low, lon_index_low
+        real(kind=8) :: lat_frac, lon_frac
+        real(kind=8) :: rain_ll, rain_lr, rain_ul, rain_ur
+    
+        ! 查找最近的时间索引
+        time_index = 1
+        do i = 2, size(rain%time)
+            if (t < rain%time(i)) exit
+            time_index = i
+        end do
+    
+        ! 查找最近的纬度和经度索引
+        lat_index_low = 1
+        do i = 2, size(rain%lat)
+            if (y < rain%lat(i)) exit
+            lat_index_low = i
+        end do
+    
+        lon_index_low = 1
+        do i = 2, size(rain%lon)
+            if (x < rain%lon(i)) exit
+            lon_index_low = i
+        end do
+    
+        ! 计算纬度和经度方向上的分数位置
+        lat_frac = (y - rain%lat(lat_index_low)) / (rain%lat(lat_index_low+1) - rain%lat(lat_index_low))
+        lon_frac = (x - rain%lon(lon_index_low)) / (rain%lon(lon_index_low+1) - rain%lon(lon_index_low))
+    
+        ! 获取四个相邻网格点的降雨量
+        rain_ll = rain%rain_rate(time_index, lat_index_low, lon_index_low)
+        rain_lr = rain%rain_rate(time_index, lat_index_low, lon_index_low+1)
+        rain_ul = rain%rain_rate(time_index, lat_index_low+1, lon_index_low)
+        rain_ur = rain%rain_rate(time_index, lat_index_low+1, lon_index_low+1)
+    
+        ! 进行双线性插值
+        rain_interp = (1.0 - lat_frac) * (1.0 - lon_frac) * rain_ll &
+                      + (1.0 - lat_frac) * lon_frac * rain_lr &
+                      + lat_frac * (1.0 - lon_frac) * rain_ul &
+                      + lat_frac * lon_frac * rain_ur
+    
+    end function get_rain_interp
+    
     ! ==========================================================================
     !  storm_location(t,storm)
     !    Interpolate location of hurricane in the current time interval
@@ -1543,4 +1650,41 @@ contains
         enddo
 
     end subroutine set_willoughby_fields
+
+
+    ! ==========================================================================
+    !  set the rain fields
+    ! ==========================================================================
+    subroutine set_rain_fields(maux, mbc, mx, my, xlower, ylower,    &
+                                       dx, dy, t, aux, rain_index,   &
+                                       rain)
+        implicit none
+
+        ! Time of the rain field requested
+        integer, intent(in) :: maux,mbc,mx,my
+        real(kind=8), intent(in) :: xlower,ylower,dx,dy,t
+
+        ! Rain description
+        type(model_rain_type), intent(in) :: rain
+
+        ! Array storing rain field
+        integer, intent(in) :: rain_index
+        real(kind=8), intent(inout) :: aux(maux,1-mbc:mx+mbc,1-mbc:my+mbc)
+
+        ! Local storage
+        real(kind=8) :: x, y
+        integer :: i,j
+
+        ! Set fields
+        do j=1-mbc,my+mbc
+            y = ylower + (j-0.5d0) * dy     ! Degrees latitude
+            do i=1-mbc,mx+mbc
+                x = xlower + (i-0.5d0) * dx   ! Degrees longitude
+                call get_rain_interp(t, x, y, rain)
+                aux(rain_index, i, j) = rain_interp
+            enddo
+        enddo
+
+    end subroutine set_rain_fields
+    
 end module model_storm_module
