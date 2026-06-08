@@ -3,19 +3,16 @@ import os
 import pathlib
 import pickle
 import sys
-
 import numpy as np
 import pyfes
 import rasterio
 import xarray as xr
-
 from climada.hazard import Centroids, TCTracks
 import climada.util.coordinates as u_coord
 import climada_petals.hazard.tc_surge_geoclaw as climada_gc
 
-
-INPUT_PATH = pathlib.Path("./input")
-OUTPUT_PATH = pathlib.Path("./output")
+INPUT_PATH = pathlib.Path("/home/gaoliang/climada/tc_inundation/input")
+OUTPUT_PATH = pathlib.Path("/home/gaoliang/climada/tc_inundation/output")
 
 ZOS_PATH = lambda name: INPUT_PATH / f"monthly_zos_{name}.nc"
 
@@ -147,8 +144,8 @@ def main(storm_id, bounds=None, time=None, gauges=None, suffix="", dem="v2.1", z
         print(f"Skip already existent {out_dir} ...")
         return
 
-    with climada_gc._filter_xr_warnings():
-        tracks = TCTracks.from_ibtracs_netcdf(storm_id=storm_id, estimate_missing=True)
+    #with climada_gc._filter_xr_warnings():
+    tracks = TCTracks.from_ibtracs_netcdf(storm_id=storm_id, estimate_missing=True)
 
     if time is not None:
         ds = tracks.data[0]
