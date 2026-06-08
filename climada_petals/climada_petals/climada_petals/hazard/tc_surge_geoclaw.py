@@ -77,6 +77,8 @@ CLAWPACK_SRC_DIR = CONFIG.hazard.tc_surge_geoclaw.clawpack_src_dir.dir()
 GEOCLAW_WORK_DIR = CONFIG.hazard.tc_surge_geoclaw.geoclaw_work_dir.dir()
 """Base directory for GeoClaw run data."""
 
+RAIN_PATH = pathlib.Path("/home/gaoliang/climada/tc_inundation/input/merge_rain/")
+
 KN_TO_MS = (1.0 * ureg.knot).to(ureg.meter / ureg.second).magnitude
 NM_TO_KM = (1.0 * ureg.nautical_mile).to(ureg.kilometer).magnitude
 MBAR_TO_PA = (1.0 * ureg.mbar).to(ureg.pascal).magnitude
@@ -227,7 +229,7 @@ class TCSurgeGeoClaw(Hazard):
         """
         if tracks.size == 0:
             raise ValueError("The given TCTracks object does not contain any tracks.")
-        _setup_clawpack()
+        #_setup_clawpack()
 
         if centroids is None:
             centroids = tracks.generate_centroids(
@@ -859,6 +861,7 @@ include $(CLAW)/clawutil/src/Makefile.common
             self._set_rundata_geo()
             self._set_rundata_fgmax()
             self._set_rundata_storm()
+            self._set_rundata_rain()
             self._set_rundata_gauges()
             with contextlib.redirect_stdout(None), _backup_loggers():
                 self.rundata.write(out_dir=self.work_dir)
@@ -925,7 +928,7 @@ include $(CLAW)/clawutil/src/Makefile.common
         clawdata.num_cells = [int(np.ceil((clawdata.upper[0] - clawdata.lower[0]) * 4)),
                               int(np.ceil((clawdata.upper[1] - clawdata.lower[1]) * 4))]
         clawdata.num_eqn = 3
-        clawdata.num_aux = 3 + 1 + 3
+        clawdata.num_aux = 3 + 1 + 3 + 1
         clawdata.capa_index = 2
         clawdata.t0, clawdata.tfinal = self.time_horizon
         clawdata.dt_initial = 0.8 / max(clawdata.num_cells)
@@ -947,7 +950,7 @@ include $(CLAW)/clawutil/src/Makefile.common
         amrdata.refinement_ratios_y = amrdata.refinement_ratios_x
         amrdata.refinement_ratios_t = amrdata.refinement_ratios_x
         amrdata.amr_levels_max = len(amrdata.refinement_ratios_x) + 1
-        amrdata.aux_type = ['center', 'capacity', 'yleft', 'center', 'center', 'center', 'center']
+        amrdata.aux_type = ['center', 'capacity', 'yleft', 'center', 'center', 'center', 'center', 'center']
         amrdata.regrid_interval = 3
         amrdata.regrid_buffer_width = 2
         amrdata.verbosity_regrid = 0
@@ -1074,11 +1077,45 @@ include $(CLAW)/clawutil/src/Makefile.common
         surge_data.pressure_forcing = True
         surge_data.storm_specification_type = 'holland80'
         surge_data.storm_file = str(self.work_dir.joinpath("track.storm"))
+        surge_data.rain_forcing = True
+        surge_data.rain_file = str(self.work_dir.joinpath("extracted_rain.nc"))
         gc_storm = _climada_xarray_to_geoclaw_storm(
             self.track, offset=_dt64_to_pydt(self.time_offset),
         )
         gc_storm.write(surge_data.storm_file, file_format='geoclaw')
 
+    def _set_rundata_rain(self) -> None:
+        """Set rain-related rundata attributes."""
+        year = str(self.track["time"].dt.year.values[0])
+        path = str(RAIN_PATH / f"CMORPH_{year}.nc")
+        #_sea_level_nc_info(path)
+        # Open the original dataset
+        ds_o = xr.open_dataset(path)
+        ds = ds_o.sortby('time')
+        print(ds)
+        lat_min = self.centroids[:, 0].min()
+        lat_max = self.centroids[:, 0].max()
+        lon_min = self.centroids[:, 1].min()
+        lon_max = self.centroids[:, 1].max()
+        print(lat_min, lon_max)
+        # Define the period from track data
+        period_start = np.datetime64(self.track["time"].values[0])
+        period_end = np.datetime64(self.track["time"].values[-1])
+        #period_start = np.datetime64(self.track['time'].values[0])
+        #period_end = np.datetime64(self.track['time'].values[-1])
+        print(period_start, period_end)
+        # Select data within the defined period
+        # 创建布尔索引
+        time_mask = (ds.time >= period_start) & (ds.time <= period_end)
+        ds_sel = ds.sel(lon=slice(lon_min, lon_max), lat=slice(lat_min, lat_max), time=time_mask)
+        print(ds_sel)
+        # 获取时间变量和其他相关信息
+        time_var = ds_sel['time']
+        time_seconds = (time_var.values - period_start).astype('timedelta64[s]').astype(np.float32)
+        ds_sel['time_sec'] = (('time',), time_seconds)
+        # Save the extracted dataset to a new NetCDF file
+        rain_file = self.work_dir / "extracted_rain.nc"
+        ds_sel.to_netcdf(rain_file)
 
     def _set_rundata_gauges(self) -> None:
         """Set gauge-related rundata attributes."""
@@ -1311,6 +1348,54 @@ def sea_level_from_nc(
             v_agg = getattr(da_zos, t_agg)().item()
         return v_agg + mod_zos
     return sea_level_fun
+
+def rain_from_nc(
+    path : Union[pathlib.Path, str],
+    t_pad : Optional[np.timedelta64] = None,
+    mod_mul : float = 1.0,
+) -> Callable:
+    """Generate a function that reads centroid rain from a NetCDF file
+
+    The grid cell closest to the area's centroid that has valid entries is identified. Then the
+    specified aggregation method (e.g. "mean" or "max") is applied over the time period.
+
+    Parameters
+    ----------
+    path : Path or str
+        Path to NetCDF file containing gridded sea level data with time resolution.
+    t_agg : str, optional
+        Aggregation method to apply over the time period. Supported methods: "mean", "min", "max".
+        Default: "mean"
+    t_pad : np.timedelta64, optional
+        Padding to add around the time period. Default: 0.
+    mod_mul : float, optional
+        The multiply coefficient is added to the rain value that is extracted from the
+        specified NetCDF file. Default: 1.0
+
+    Returns
+    -------
+    fun : function (tuple, tuple) -> float
+        The first argument is a tuple of floats (lon_min, lat_min, lon_max, lat_max), the second
+        argument is a pair of np.datetime64 (start, end). The function returns the mean rain
+        in the specified region and time period.
+    """
+    #t_agg = t_agg.lower()
+    #if t_agg not in ["mean", "min", "max"]:
+        #raise ValueError(f"Aggregation method not supported: {t_agg}")
+    _sea_level_nc_info(path)
+    def rain_fun(bounds, period, path=path, t_pad=t_pad, mod_mul=mod_mul):
+        t_pad = np.timedelta64(0, "D") if t_pad is None or t_pad == 0 else t_pad
+        period = (period[0] - t_pad, period[1] + t_pad)
+        centroid = (0.5 * (bounds[0] + bounds[2]), 0.5 * (bounds[1] + bounds[3]))
+        print(path)
+        with _filter_xr_warnings(), xr.open_dataset(path) as ds:
+            da_rain = ds
+            period = [_get_closest_date_in_index(da_rain["time"], t) for t in period]
+            da_rain = da_rain.sel(time=(da_rain["time"] >= period[0]) & (da_rain["time"] <= period[1]))
+            lon, lat = _get_closest_valid_cell(da_rain, *centroid)
+            da_rain = da_rain.sel(lon=lon, lat=lat)
+        return da_rain * mod_mul
+    return rain_fun
 
 
 def _get_closest_valid_cell(
