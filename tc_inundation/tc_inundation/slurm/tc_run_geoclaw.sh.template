@@ -1,0 +1,72 @@
+#!/bin/bash
+
+# Copy this script to tc_run_geoclaw.sh and replace all <placeholders> before use.
+#
+# Meanings of the placeholders:
+# <slurm-account> : The name of your SLURM account, see `sacctmgr list user -s $USER`
+# <repo-path> : Path to the base directory of this git repository.
+# <conda-base> : Conda install path, e.g. /home/$USER/miniforge3/
+# <conda-env> : Name of your conda environment, e.g. climada_env
+
+#SBATCH --qos=priority
+#SBATCH --job-name=tc_run_geoclaw
+#SBATCH --account=<slurm-account>
+#SBATCH --chdir=<repo-path>/log
+#SBATCH --output=tc_run_geoclaw-%A_%a.out
+#SBATCH --error=tc_run_geoclaw-%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+
+# add --array=1-$(cat $1 | wc -l) to the sbatch call
+
+module load git
+module load compiler/gnu/7.3.0
+module load intel/2019.0-nopython
+
+export BASE_PATH=<repo-path>
+export CONDA_PREFIX_1=<conda-base>
+export CONDA_GEOCLAW_ENV=<conda-env>
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+export OMP_STACKSIZE=500M
+export GOMP_STACKSIZE=$OMP_STACKSIZE
+export KMP_STACKSIZE=$OMP_STACKSIZE
+
+# commented out means no permission:
+ulimit -t unlimited              # cputime
+ulimit -f unlimited              # filesize
+ulimit -d unlimited              # datasize
+ulimit -s unlimited              # stacksize
+ulimit -c unlimited              # coredumpsize
+# ulimit -m unlimited              # memoryuse
+ulimit -v unlimited              # vmemoryuse
+# ulimit -n unlimited              # descriptors
+ulimit -l unlimited              # memorylocked
+# ulimit -u unlimited              # maxproc
+
+source $CONDA_PREFIX_1/etc/profile.d/conda.sh
+conda activate $CONDA_GEOCLAW_ENV
+
+# by default, run with gfortran:
+export FC="gfortran"
+export FFLAGS='-O2 -fopenmp'
+# addtional legacy flags:
+# export FFLAGS='-fPIC -O2 -fopenmp -lgomp'
+# for debugging purposes:
+# export FFLAGS='-fopenmp -O0 -W -Wall -fbounds-check -fcheck=all -Wunderflow -fbacktrace -ffpe-trap=invalid,zero,overflow -g'
+
+# Alternatively, run with intel compiler:
+# module load compiler/intel
+# export FC='ifort'
+# export FFLAGS='-O3 -qopenmp'
+# for debugging purposes:
+# export FFLAGS='-O3 -g -traceback -check all -fp-stack-check -qopenmp'
+
+cd $BASE_PATH
+ARGS="$(sed -n "${SLURM_ARRAY_TASK_ID}p" $1)"
+echo $1 > log/tc_run_geoclaw-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.jobfile
+echo $ARGS > log/tc_run_geoclaw-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.args
+python scripts/tc_run_geoclaw.py $ARGS

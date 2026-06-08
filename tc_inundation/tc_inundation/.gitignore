@@ -1,0 +1,7 @@
+*-*-*-*-*-*
+input
+jobs
+log
+output*
+*.log
+slurm/*.sh

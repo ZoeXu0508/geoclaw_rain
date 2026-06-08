@@ -1,0 +1,8 @@
+input
+output
+log
+__pycache__
+.ipynb_checkpoints
+.jupyter*
+Untitled.ipynb
+*.egg-info
